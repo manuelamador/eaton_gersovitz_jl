@@ -34,17 +34,17 @@ end
     γ = 2.0 # risk aversion parameter
     α = 2.0 # 1/IES parameter
     θ = 0.282   # prob of regaining market access
-    nb_approx::Int64 = 101  # approximate points for B grid 
-    b_max = 0.50   # maximum debt level
-    b_min = -0.10   # minimum debt level 
-    ny::Int64 = 100
+    b_max = 1.2   # maximum debt level
+    b_min = -0.2   # minimum debt level 
+    nb_approx::Int64 = 200  # approximate points for B grid 
+    ny::Int64 = 100  # grid points for output 
     y_MC::MarkovChainWithMean = tauchen_AR1_in_logs(
         N=ny, 
         ρ=0.948503, 
         σ=0.027093, 
         μ=0.0, 
         span=3.0, 
-        inflate_ends=true
+        inflate_ends=false
     )
     y_def_fun::F1 = arellano_default_cost(0.969, y_MC.mean)
 
@@ -57,6 +57,7 @@ end
     zero_index::Int64 = findfirst(isequal(0.0), b_grid)
     d_and_c_fun::F2 = get_d_and_c_fun(nb)
     u::F3 = (c -> c^(1 - γ))
+    min_v = 0.0
 end
 
 
@@ -227,13 +228,9 @@ end
 function update_vD!(new, model, old; tmp=similar(new.vD))
     @unpack T, θ, zero_index, y_def_grid, y_grid, α = model
     
-    mm = @view new.vR[:, zero_index]
+    mm = @view new.vMax[:, zero_index]
     tmp .= θ .* (mm.^(1-α)) .+ (1-θ) .* old.vD.^(1-α)
-    # for iy in eachindex(y_grid)
-    #     tmp[iy] = (θ * new.vR[iy, zero_index]^(1-α) + 
-    #         (1 - θ) * old.vD[iy]^(1-α))
-    # end
-    for iy in eachindex(y_grid)
+    Threads.@threads for iy in eachindex(y_grid)
         cont_value = 0.0 
          for iy′ in eachindex(y_grid)
             cont_value += T[iy′, iy] * tmp[iy′]
@@ -259,7 +256,7 @@ end
 
 
 function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
-    @unpack u, β, γ, α, y_grid, b_grid, d_and_c_fun, T, nb, ny = model
+    @unpack u, β, γ, α, y_grid, b_grid, d_and_c_fun, T, nb, ny, min_v = model
 
     # precomputing the continuation value
     for ib in 1:nb
@@ -277,10 +274,10 @@ function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
         )
         if ib > default_at 
             # already defaulted with less debt -- default here too
-            assign!(new, iy, ib, 0.0, old.vD[iy], false, 0)
+            assign!(new, iy, ib, min_v, old.vD[iy], false, 0)
         else
             first_valid = true 
-            current_max = 0.0 
+            current_max = min_v 
             policy = 0
             for ib_prime in left_bound:right_bound
                 c = y_grid[iy]+ old.q[iy, ib_prime] * b_grid[ib_prime] - 
@@ -311,7 +308,7 @@ function iterate_once!(
     tmp_EV=similar(new.vR), tmp_vMax=similar(new.vR), tmp_EvD=similar(new.vD)
 )
     tmp_vMax .= old.vMax.^(1-model.α)  # auxiliary calculation
-    for iy in 1:model.ny
+    Threads.@threads for iy in 1:model.ny
         solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
     end 
     update_vD!(new, model, old; tmp=tmp_EvD)
