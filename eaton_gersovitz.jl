@@ -1,7 +1,5 @@
-# This is the code to solve the one-period Eaton-Gersovitz model with 
-# one-period debt. 
-#
-# It allows for Epstein-Zin recursive utility. 
+# This code solves the one-period Eaton-Gersovitz model with 
+# one-period debt allowing for Epstein-Zin recursive utility. 
 
 using Parameters
 using PyPlot
@@ -19,16 +17,9 @@ const _MAX_ITERS = 10000
 # 
 #
 
-struct MarkovChainWithMean{T1, T2}
-    T::Array{T1, 2}
-    grid::Array{T2, 1}
-    mean::T2 
-end
-
-
 # `EatonGersovitz` contains the basic parameters of the model as well 
 # as some other values and the debt grid. 
-@with_kw struct EatonGersovitzModel{F1, F2, F3} @deftype Float64
+@with_kw struct EatonGersovitzModel{M, F1, F2, F3} @deftype Float64
     R = 1.017
     β = 0.953 
     γ = 2.0 # risk aversion parameter
@@ -37,20 +28,23 @@ end
     b_max = 1.2   # maximum debt level
     b_min = -0.2   # minimum debt level 
     nb_approx::Int64 = 200  # approximate points for B grid 
-    ny::Int64 = 100  # grid points for output 
-    y_MC::MarkovChainWithMean = tauchen_AR1_in_logs(
-        N=ny, 
+    y_process::M = logAR1(
+        N=100, 
         ρ=0.948503, 
         σ=0.027093, 
         μ=0.0, 
         span=3.0, 
         inflate_ends=false
-    )
-    y_def_fun::F1 = arellano_default_cost(0.969, y_MC.mean)
+    ) 
+    # y_process should be a named tuple with a transition matrix, T, a grid, grid,
+    # as well as a value for the ergodic mean, mean. 
+    y_def_fun::F1 = arellano_default_cost(0.969, y_process.mean)
 
-    y_grid::Array{Float64, 1} = y_MC.grid
-    T::Array{Float64, 2} = y_MC.T
-    y_mean = y_MC.mean
+    # generated parameters
+    ny::Int64 = length(y_process.grid)  # grid points for output 
+    y_grid::Array{Float64, 1} = y_process.grid
+    T::Array{Float64, 2} = y_process.T
+    y_mean = y_process.mean
     y_def_grid::Array{Float64, 1} =  y_def_fun.(y_grid)
     b_grid::Array{Float64, 1} = generate_b_grid(b_min, b_max, nb_approx)
     nb::Int64 = length(b_grid)
@@ -94,7 +88,8 @@ insert_and_dedup!(v::Vector, x) = (splice!(v, searchsorted(v,x), x); v)
 
 function generate_b_grid(b_min, b_max, nB_approx)
     grid = collect(range(b_min, stop=b_max, length=nB_approx))
-    insert_and_dedup!(grid, 0.0)
+    insert_and_dedup!(grid, 0.0) # make sure that zero is in the grid of assets
+                                 # important for re-entry
     return grid
 end 
 
@@ -114,7 +109,7 @@ function quadratic_default_cost(h1, h2)
 end 
 
 # Taken from Stelios code 
-function  tauchen_AR1_in_logs(;
+function  logAR1(;
     N=100, ρ=0.948503, σ=0.027093, μ=0.0, span=3.0, inflate_ends=true
 )
     # Get discretized space using Tauchen's method
@@ -140,11 +135,9 @@ function  tauchen_AR1_in_logs(;
             end
         end
     else
-        for i = 1:N
-            for j = 1:N
-                T[j, i] = (std_norm_cdf((y[j] - ρ*y[i] + d/2) / σ) -
-                    std_norm_cdf((y[j] - ρ*y[i] - d/2) / σ))
-            end
+        for i = 1:N, j = 1:N
+            T[j, i] = (std_norm_cdf((y[j] - ρ*y[i] + d/2) / σ) -
+                std_norm_cdf((y[j] - ρ*y[i] - d/2) / σ))
         end
     end
     y_grid = exp.(y .+ μ / (1 - ρ))
@@ -153,7 +146,7 @@ function  tauchen_AR1_in_logs(;
     for i in 1:N
         T[:,i] .*= T_sums[i]^(-1)
     end
-    return MarkovChainWithMean(T, y_grid, y_mean)
+    return (T=T, grid=y_grid, mean=y_mean)
 end
 
 
@@ -228,7 +221,9 @@ end
 function update_vD!(new, model, old; tmp=similar(new.vD))
     @unpack T, θ, zero_index, y_def_grid, y_grid, α = model
     
-    mm = @view new.vMax[:, zero_index]
+    mm = @view new.vMax[:, zero_index] # vMax allows the possibility of 
+        # immediate default after re-entry. Important for iterations away from
+        # fixed point. 
     tmp .= θ .* (mm.^(1-α)) .+ (1-θ) .* old.vD.^(1-α)
     Threads.@threads for iy in eachindex(y_grid)
         cont_value = 0.0 
@@ -259,13 +254,14 @@ function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
     @unpack u, β, γ, α, y_grid, b_grid, d_and_c_fun, T, nb, ny, min_v = model
 
     # precomputing the continuation value
-    for ib in 1:nb
-        acc = 0.0
-        for iyprime in 1:ny
-            acc += T[iyprime, iy] * tmp_vMax[iyprime, ib]
-        end
-        tmp_EV[iy, ib] = β * acc^((1-γ)/(1-α))
-    end
+     
+    # for ib in 1:nb
+    #     acc = 0.0
+    #     for iyprime in 1:ny
+    #         acc += T[iyprime, iy] * tmp_vMax[iyprime, ib]
+    #     end
+    #     tmp_EV[iy, ib] = β * acc^((1-γ)/(1-α))
+    # end
     default_at = nb + 1
     for ib_iter in 1:nb
         ib, left_bound, right_bound = d_and_c_fun(
@@ -307,7 +303,13 @@ function iterate_once!(
     new, model, old; 
     tmp_EV=similar(new.vR), tmp_vMax=similar(new.vR), tmp_EvD=similar(new.vD)
 )
-    tmp_vMax .= old.vMax.^(1-model.α)  # auxiliary calculation
+    @unpack T, β, γ, α = model
+
+    # auxiliary calculation of expected continuation value function
+    tmp_vMax .= old.vMax.^(1-model.α)  
+    mul!(tmp_EV, T', tmp_vMax)
+    tmp_EV .= β .* tmp_EV .^ ((1-γ)/(1-α))
+
     Threads.@threads for iy in 1:model.ny
         solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
     end 
@@ -342,7 +344,7 @@ function solve(
             tmp_EV=tmp1, tmp_vMax=tmp2, tmp_EvD=tmp3
         )
         dist = distance(new, old)
-#        dist = chebyshev(new.vR, old.vR) + chebyshev(new.q, old.q)
+        # dist = chebyshev(new.vR, old.vR) + chebyshev(new.q, old.q)
         if mod(i, 100) == 1
             println("Iteration:", i, "  error:", dist)
         end 
