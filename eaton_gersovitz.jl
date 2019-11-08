@@ -6,6 +6,8 @@
 using Parameters
 using PyPlot
 using SpecialFunctions
+# using Distances
+using LinearAlgebra
 
 const _TOL = 10.0^(-12)
 const _MAX_ITERS = 10000 
@@ -17,81 +19,67 @@ const _MAX_ITERS = 10000
 # 
 #
 
-struct MarkovChain{T1, T2}
+struct MarkovChainWithMean{T1, T2}
     T::Array{T1, 2}
     grid::Array{T2, 1}
     mean::T2 
 end
 
 
-@with_kw struct AR1InLogs @deftype Float64  
-    N::Integer = 100
-    ρ = 0.948503
-    σ = 0.027093
-    μ = 1.0
-    span = 3.0
-    inflate_ends::Bool = true
-end 
-
-
 # `EatonGersovitz` contains the basic parameters of the model as well 
 # as some other values and the debt grid. 
-@with_kw struct EatonGersovitzModel{F1, F2} @deftype Float64
-    R = 1.05 
-    β = 0.91 
+@with_kw struct EatonGersovitzModel{F1, F2, F3} @deftype Float64
+    R = 1.017
+    β = 0.953 
     γ = 2.0 # risk aversion parameter
     α = 2.0 # 1/IES parameter
-    ρ = 0.948503  # persistence in output
-    η = 0.027093  # st dev of output shocks 
     θ = 0.282   # prob of regaining market access
-    ny = 100  # points for y grid 
-    nB = 101  # points for B grid 
-    debt_max = 0.45   # maximum debt level
-    debt_min = -0.1   # minimum debt level 
-    b_grid = collect(range(debt_min, stop=debt_max, length=nB))
-    y_chain::MarkovChain = discretize(AR1InLogs(
-        N=100, ρ=0.948503, σ=0.027093, μ=0.0, span=3.0, inflate_ends=true
-        ))
-    y_grid::Array{Float64, 1} = y_chain.grid
-    T::Array{Float64, 2} = y_chain.T
-    y_mean = y_chain.mean
-    y_def_fun::F1 = arellano_default_cost(0.969, y_mean)
-    y_def_grid::Array{Float64, 1} = y_def_fun.(y_grid)
-    d_and_c_fun::F2 = get_d_and_c_fun(gridlen)
+    nb_approx::Int64 = 101  # approximate points for B grid 
+    b_max = 0.50   # maximum debt level
+    b_min = -0.10   # minimum debt level 
+    ny::Int64 = 100
+    y_MC::MarkovChainWithMean = tauchen_AR1_in_logs(
+        N=ny, 
+        ρ=0.948503, 
+        σ=0.027093, 
+        μ=0.0, 
+        span=3.0, 
+        inflate_ends=true
+    )
+    y_def_fun::F1 = arellano_default_cost(0.969, y_MC.mean)
+
+    y_grid::Array{Float64, 1} = y_MC.grid
+    T::Array{Float64, 2} = y_MC.T
+    y_mean = y_MC.mean
+    y_def_grid::Array{Float64, 1} =  y_def_fun.(y_grid)
+    b_grid::Array{Float64, 1} = generate_b_grid(b_min, b_max, nb_approx)
+    nb::Int64 = length(b_grid)
+    zero_index::Int64 = findfirst(isequal(0.0), b_grid)
+    d_and_c_fun::F2 = get_d_and_c_fun(nb)
+    u::F3 = (c -> c^(1 - γ))
 end
 
 
-function Base.show(io::IO, model::EatonGersovitzModel)
-    @unpack R, β, τH, τL, λ, δ, y, gridlen = model
-    print(
-        io, "R=", R, " β=", β
-    )    
-end
-
-
-# `Alloc` stores an allocation together with a reference to the model that 
-# generated it. 
-struct Eqm{P}
-    v::Array{Float64, 2}  # repayment value function
-    q::Array{Float64, 2}  # price value function 
-    b_pol_i::Array{Int64, 2}   # policy function 
-    model::P    # reference to the parent model
+struct Allocation{P}
+    vD::Array{Float64, 1}
+    vR::Array{Float64, 2}
+    vMax::Array{Float64, 2}
+    q::Array{Float64, 2}
+    b_pol::Array{Int64, 2}
+    repay::BitArray{2}
+    model::P
 end 
 
 
-Eqm(model::EatonGersovitzModel) = Eqm(
-    fill(NaN, model.gridlen),
-    fill(NaN, model.gridlen),
-    fill(NaN, model.gridlen),
-    zeros(Int64, model.gridlen),
+Allocation(model::EatonGersovitzModel) = Allocation(
+    fill(1.0, model.ny),
+    fill(1.0, (model.ny, model.nb)),
+    fill(1.0, (model.ny, model.nb)),
+    fill(1.0, (model.ny, model.nb)),
+    zeros(Int64, model.ny, model.nb),
+    falses(model.ny, model.nb),
     model
 )
-
-function Base.show(io::IO, eqm::Eqm)
-    @unpack R, β, τH, τL, λ, δ, y, gridlen = eqm.model
-    print(io, "Eqm for model: ")
-    show(io, eqm.model)   
-end
 
 
 #
@@ -101,6 +89,13 @@ end
 
 # from here: https://stackoverflow.com/questions/25678112/insert-item-into-a-sorted-list-with-julia-with-and-without-duplicates
 insert_and_dedup!(v::Vector, x) = (splice!(v, searchsorted(v,x), x); v)
+
+
+function generate_b_grid(b_min, b_max, nB_approx)
+    grid = collect(range(b_min, stop=b_max, length=nB_approx))
+    insert_and_dedup!(grid, 0.0)
+    return grid
+end 
 
 
 function arellano_default_cost(par, meanx)
@@ -117,16 +112,17 @@ function quadratic_default_cost(h1, h2)
     return x -> (x - max(zero(h1), h1 * x + h2 * x^2))
 end 
 
-
-function discretize(g::AR1InLogs)
+# Taken from Stelios code 
+function  tauchen_AR1_in_logs(;
+    N=100, ρ=0.948503, σ=0.027093, μ=0.0, span=3.0, inflate_ends=true
+)
     # Get discretized space using Tauchen's method
 
     # Define versions of the standard normal cdf for use in the tauchen method
     std_norm_cdf(x::Real) = 0.5 * erfc(-x/sqrt(2))
     std_norm_cdf(x::AbstractArray) = 0.5 .* erfc(-x./sqrt(2))
 
-    @unpack ρ, σ, μ, N, span, inflate_ends = g
-    a_bar = span * σ * sqrt(1 - ρ^2)
+    a_bar = span * σ / sqrt(1 - ρ^2)
     y = LinRange(-a_bar, a_bar, N)  # this refers to the log of y
     d = y[2] - y[1]
     # Get transition probabilities
@@ -151,17 +147,16 @@ function discretize(g::AR1InLogs)
         end
     end
     y_grid = exp.(y .+ μ / (1 - ρ))
-    y_mean = exp(μ / (1 - ρ) + 1/2 * σ^2 / (1- ρ^2))
+    y_mean = exp(μ / (1 - ρ) + 1/2 * σ^2 / (1 - ρ^2))
     T_sums = sum(T, dims=1)
     for i in 1:N
         T[:,i] .*= T_sums[i]^(-1)
     end
-    return MarkovChain(T, y_grid, y_mean)
+    return MarkovChainWithMean(T, y_grid, y_mean)
 end
 
 
 function get_d_and_c_fun(gridlen::Int64)
-
     """
     Generate a bisection tree from array to be used in the "divide and conquer"
     algorithm. 
@@ -222,4 +217,146 @@ function get_d_and_c_fun(gridlen::Int64)
 end
 
 
+function EZutility(model, c, V)
+    @unpack β, u, γ, α = model 
+    tmp = (1-β) * u(c) + β * V^((1-γ)/(1-α))
+    return tmp^(1/(1-γ))
+end
+
+
+function update_vD!(new, model, old; tmp=similar(new.vD))
+    @unpack T, θ, zero_index, y_def_grid, y_grid, α = model
+    
+    mm = @view new.vR[:, zero_index]
+    tmp .= θ .* (mm.^(1-α)) .+ (1-θ) .* old.vD.^(1-α)
+    # for iy in eachindex(y_grid)
+    #     tmp[iy] = (θ * new.vR[iy, zero_index]^(1-α) + 
+    #         (1 - θ) * old.vD[iy]^(1-α))
+    # end
+    for iy in eachindex(y_grid)
+        cont_value = 0.0 
+         for iy′ in eachindex(y_grid)
+            cont_value += T[iy′, iy] * tmp[iy′]
+         end 
+         new.vD[iy] = EZutility(model, y_def_grid[iy], cont_value)
+    end
+end
+
+
+function update_q!(new, model)
+    @unpack T, R = model
+    mul!(new.q, T', new.repay)
+    new.q .*= R^(-1)
+end
+
+
+function assign!(new, iy, ib, vR, vMax, repay, b_pol)
+    new.vR[iy, ib] = vR
+    new.vMax[iy, ib] = vMax
+    new.repay[iy, ib] = repay
+    new.b_pol[iy, ib] = b_pol
+end
+
+
+function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
+    @unpack u, β, γ, α, y_grid, b_grid, d_and_c_fun, T, nb, ny = model
+
+    # precomputing the continuation value
+    for ib in 1:nb
+        acc = 0.0
+        for iyprime in 1:ny
+            acc += T[iyprime, iy] * tmp_vMax[iyprime, ib]
+        end
+        tmp_EV[iy, ib] = β * acc^((1-γ)/(1-α))
+    end
+    default_at = nb + 1
+    for ib_iter in 1:nb
+        ib, left_bound, right_bound = d_and_c_fun(
+            ib_iter, 
+            @view new.b_pol[iy, :]
+        )
+        if ib > default_at 
+            # already defaulted with less debt -- default here too
+            assign!(new, iy, ib, 0.0, old.vD[iy], false, 0)
+        else
+            first_valid = true 
+            current_max = 0.0 
+            policy = 0
+            for ib_prime in left_bound:right_bound
+                c = y_grid[iy]+ old.q[iy, ib_prime] * b_grid[ib_prime] - 
+                    b_grid[ib]
+                if c > 0.0
+                    m = ((1 - β) * u(c) + tmp_EV[iy, ib_prime])^(1/(1-γ))
+                    if (first_valid) || (m > current_max)
+                        current_max = m 
+                        policy = ib_prime
+                        first_valid = false
+                    end
+                end
+            end
+            if (!first_valid) && (current_max >= old.vD[iy])
+                assign!(new, iy, ib, current_max, current_max, true, policy)
+            else 
+                # not feasible or default is preferred
+                assign!(new, iy, ib, current_max, old.vD[iy], false, policy)
+                default_at = ib
+            end 
+        end
+    end
+end
+
+
+function iterate_once!(
+    new, model, old; 
+    tmp_EV=similar(new.vR), tmp_vMax=similar(new.vR), tmp_EvD=similar(new.vD)
+)
+    tmp_vMax .= old.vMax.^(1-model.α)  # auxiliary calculation
+    for iy in 1:model.ny
+        solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
+    end 
+    update_vD!(new, model, old; tmp=tmp_EvD)
+    update_q!(new, model)
+end
+
+
+# Helper distance function 
+function distance(new, old)
+    error = 0.0
+    for (a, b, c, d) in zip(new.vR, old.vR, new.q, old.q)
+        error = max(error, abs(a - b), abs(c - d))
+    end 
+    return error
+end
+
+
+function solve(
+    model; 
+    new=Allocation(model), 
+    start=Allocation(model),
+    max_iters::Int64=_MAX_ITERS,
+    tol::Float64=_TOL
+)
+    tmp1, tmp2, tmp3 = similar(new.vR), similar(new.vR), similar(new.vD)
+    old = start
+    dist = 0.0
+    for i in 1:max_iters
+        iterate_once!(
+            new, model, old; 
+            tmp_EV=tmp1, tmp_vMax=tmp2, tmp_EvD=tmp3
+        )
+        dist = distance(new, old)
+#        dist = chebyshev(new.vR, old.vR) + chebyshev(new.q, old.q)
+        if mod(i, 100) == 1
+            println("Iteration:", i, "  error:", dist)
+        end 
+        if (dist < tol)
+            println("Iteration:", i, " error: ", dist)
+            return new
+        else
+            new, old = old, new
+        end
+    end
+    println("Did not converge!, iteration: ", max_iters, " error: ", dist)
+    return new
+end
 
