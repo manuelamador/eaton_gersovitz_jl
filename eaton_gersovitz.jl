@@ -2,10 +2,11 @@
 # one-period debt allowing for Epstein-Zin recursive utility. 
 
 using Parameters
-using PyPlot
+# using PyPlot
 using SpecialFunctions
-# using Distances
+using Distances
 using LinearAlgebra
+using SparseArrays
 
 const _TOL = 10.0^(-12)
 const _MAX_ITERS = 10000 
@@ -21,15 +22,15 @@ const _MAX_ITERS = 10000
 # as some other values and the debt grid. 
 @with_kw struct EatonGersovitzModel{M, F1, F2, F3} @deftype Float64
     R = 1.017
-    β = 0.953 
+    β = 0.953
     γ = 2.0 # risk aversion parameter
     α = 2.0 # 1/IES parameter
     θ = 0.282   # prob of regaining market access
     b_max = 1.2   # maximum debt level
     b_min = -0.2   # minimum debt level 
-    nb_approx::Int64 = 200  # approximate points for B grid 
+    nb_approx::Int64 = 300  # approximate points for B grid 
     y_process::M = logAR1(
-        N=100, 
+        N=200, 
         ρ=0.948503, 
         σ=0.027093, 
         μ=0.0, 
@@ -224,7 +225,7 @@ function update_vD!(new, model, old; tmp=similar(new.vD))
     mm = @view new.vMax[:, zero_index] # vMax allows the possibility of 
         # immediate default after re-entry. Important for iterations away from
         # fixed point. 
-    tmp .= θ .* (mm.^(1-α)) .+ (1-θ) .* old.vD.^(1-α)
+    tmp .= θ .* (mm.^(1-α)) .+ (1-θ) .* (old.vD.^(1-α))
     Threads.@threads for iy in eachindex(y_grid)
         cont_value = 0.0 
          for iy′ in eachindex(y_grid)
@@ -253,15 +254,6 @@ end
 function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
     @unpack u, β, γ, α, y_grid, b_grid, d_and_c_fun, T, nb, ny, min_v = model
 
-    # precomputing the continuation value
-     
-    # for ib in 1:nb
-    #     acc = 0.0
-    #     for iyprime in 1:ny
-    #         acc += T[iyprime, iy] * tmp_vMax[iyprime, ib]
-    #     end
-    #     tmp_EV[iy, ib] = β * acc^((1-γ)/(1-α))
-    # end
     default_at = nb + 1
     for ib_iter in 1:nb
         ib, left_bound, right_bound = d_and_c_fun(
@@ -274,7 +266,10 @@ function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
         else
             first_valid = true 
             current_max = min_v 
-            policy = 0
+            policy = nb  # default value if no value is feasible
+                         # This is important because for div and conquer
+                         # policy is used to restrict choice sets every where
+                         # else. 
             for ib_prime in left_bound:right_bound
                 c = y_grid[iy]+ old.q[iy, ib_prime] * b_grid[ib_prime] - 
                     b_grid[ib]
@@ -306,7 +301,7 @@ function iterate_once!(
     @unpack T, β, γ, α = model
 
     # auxiliary calculation of expected continuation value function
-    tmp_vMax .= old.vMax.^(1-model.α)  
+    tmp_vMax .= old.vMax.^(1-α)  
     mul!(tmp_EV, T', tmp_vMax)
     tmp_EV .= β .* tmp_EV .^ ((1-γ)/(1-α))
 
@@ -319,7 +314,7 @@ end
 
 
 # Helper distance function 
-function distance(new, old)
+function distance(new::Allocation, old::Allocation)
     error = 0.0
     for (a, b, c, d) in zip(new.vR, old.vR, new.q, old.q)
         error = max(error, abs(a - b), abs(c - d))
@@ -335,6 +330,8 @@ function solve(
     max_iters::Int64=_MAX_ITERS,
     tol::Float64=_TOL
 )
+    # Solves the Eaton-Gersovitz model. 
+
     tmp1, tmp2, tmp3 = similar(new.vR), similar(new.vR), similar(new.vD)
     old = start
     dist = 0.0
@@ -359,3 +356,107 @@ function solve(
     return new
 end
 
+
+function create_transition_matrix(alloc)
+    # Construct a sparse matrix containing the transition matrix associated 
+    # with alloc. 
+    # The columns are the current state, the rows are next period state.
+    # The state vector is a 1-D array where position ny * (ib - 1) + iy 
+    # corresponds to (iy, ib), where ny is the total number of y points.
+    # That is, we cycle through the y_grid, and then through the b_grid. 
+    # This 1-D state vector contains an additional ny states at its end, 
+    # representing the default state with each of its endowment realizations. 
+
+    @unpack model = alloc 
+    @unpack θ, T, y_grid, b_grid, ny, nb = model 
+
+    non_zero_elements = ny * nb + ny * 2
+    col_list = Int64[]
+    row_list = Int64[]
+    val_list = Float64[]
+
+    for iy in eachindex(y_grid)
+        for ib in eachindex(b_grid)
+            b_pol = alloc.b_pol[iy, ib]
+            for iyprime in eachindex(y_grid)
+                push!(row_list, ny * (ib - 1) + iy)
+                push!(val_list, T[iyprime, iy])
+                if alloc.repay[iy, ib] && alloc.repay[iyprime, b_pol]
+                    push!(col_list, ny * (b_pol - 1) + iyprime)
+                else 
+                    push!(col_list, ny * nb + iyprime)  # default state
+                    # this also applies if you are defaulting today
+                    # as the policy in that case is irrelevant.
+                end
+            end
+        end
+    end
+
+    for iy in eachindex(y_grid)
+        b_pol = model.zero_index
+        for iyprime in eachindex(y_grid)
+            push!(row_list, ny * nb + iy)
+            push!(val_list, θ * T[iyprime, iy]) # reentry
+            if alloc.repay[iyprime, b_pol]
+                push!(col_list, ny * (b_pol - 1) + iyprime)
+            else 
+                push!(col_list, ny * nb + iyprime)  # default state
+            end
+            push!(row_list, ny * nb + iy)
+            push!(val_list, (1 - θ) * T[iyprime, iy])  # stay out
+            push!(col_list, ny * nb + iyprime)
+        end
+    end
+
+    len = ny * (nb + 1)
+    return dropzeros(sparse(col_list, row_list, val_list, len, len))
+end
+
+
+function find_ergodic(
+    T; 
+    v0=ones(Float64, size(T)[1]) / size(T)[1], max_iters=_MAX_ITERS, tol=_TOL
+)
+    # Given a transition probability T, and an initial vector v0, calculates
+    # the ergodic distribution by pre-multiplying v0 by T until convergence. 
+    i = 1
+    v1 = similar(v0)
+    while true
+        mul!(v1, T, v0)
+        dist = chebyshev(v1, v0)  # sup norm
+        if mod(i, 100) == 1
+            println("Iteration:", i, "  error:", dist)
+        end
+        if (dist < tol)
+            println("Iteration:", i, " error: ", dist)
+            break 
+        end 
+        if i > max_iters
+            println("Did not converge!!")
+            break
+        end
+        i += 1
+        v1, v0 = v0, v1
+    end
+    return v1
+end 
+
+
+function find_ergodic(alloc::Allocation)
+    # Returns the ergodic distribution associated with alloc.
+    # Returns a matrix  of dimension ny * (nb + 1) containing the ergodic
+    # distribution. There is an addition "debt" state (the last column), which 
+    # represents the default state. 
+
+    @unpack model = alloc
+    @unpack nb, ny = model 
+    tt = create_transition_matrix(alloc)
+    cdf_ergodic = find_ergodic(tt)  # this return a 1-D vector ... 
+    cdf = Array{Float64}(undef, ny, nb + 1) # and we transform it to a 2-D one.
+    for i in eachindex(cdf_ergodic)
+        # exploits that the index of cdf_ergodic is equivalent to the 
+        # linear index in cdf (first iterate y_grid, then b_grid).
+        cdf[i] = cdf_ergodic[i]
+    end 
+    return cdf
+end
