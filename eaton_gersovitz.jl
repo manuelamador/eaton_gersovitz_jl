@@ -27,7 +27,7 @@ const _MAX_ITERS = 10000
     θ = 0.282   # prob of regaining market access
     b_max = 1.2   # maximum debt level
     b_min = -0.2   # minimum debt level 
-    nb_approx::Int64 = 300  # approximate points for B grid 
+    nb_approx::Int64 = 200  # approximate points for B grid 
     y_process::M = logAR1(
         N=200, 
         ρ=0.948503, 
@@ -73,8 +73,27 @@ Allocation(model::EatonGersovitzModel) = Allocation(
     fill(1.0, (model.ny, model.nb)),
     zeros(Int64, model.ny, model.nb),
     falses(model.ny, model.nb),
-    model
+    model 
 )
+
+
+function Base.show(io::IO, model::EatonGersovitzModel)
+    @unpack R, β, γ, α, θ, b_max, b_min, nb, ny = model
+    @unpack N, ρ, σ, μ, span, inflate_ends = model.y_process.par
+    print(
+        io, 
+        "R=", R, " β=", β, " γ=", γ, " α=", α," θ=", θ,
+        " b_max=", b_max, " b_min=", b_min, " nb=", nb, 
+        " N=", N, " ρ=", ρ, " σ=", σ, " μ=", μ, " span=", span, 
+        " inflate_ends=", inflate_ends, " ny=", ny
+    )    
+end
+
+
+function Base.show(io::IO, alloc::Allocation)
+    print(io, "Allocation for model: ")
+    show(io, alloc.model)   
+end
 
 
 #
@@ -146,7 +165,10 @@ function  logAR1(;
     for i in 1:N
         T[:,i] .*= T_sums[i]^(-1)
     end
-    return (T=T, grid=y_grid, mean=y_mean)
+    return (
+        T=T, grid=y_grid, mean=y_mean, 
+        par=(N=N, ρ=ρ, σ=σ, μ=μ, span=span, inflate_ends=inflate_ends)
+    )
 end
 
 
