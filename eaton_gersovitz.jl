@@ -2,7 +2,6 @@
 # one-period debt allowing for Epstein-Zin recursive utility. 
 
 using Parameters
-# using PyPlot
 using SpecialFunctions
 using Distances
 using LinearAlgebra
@@ -24,7 +23,7 @@ const _MAX_ITERS = 10000
     R = 1.017
     β = 0.953
     γ = 2.0 # risk aversion parameter
-    α = 2.0 # 1/IES parameter
+    α = 2.0 # 1/IES parameter -- γ == α is CRRA
     θ = 0.282   # prob of regaining market access
     b_max = 1.2   # maximum debt level
     b_min = -0.2   # minimum debt level 
@@ -154,7 +153,7 @@ end
 function get_d_and_c_fun(gridlen::Int64)
     """
     Generate a bisection tree from array to be used in the "divide and conquer"
-    algorithm. 
+    algorithm.  https://doi.org/10.3982/QE640
 
     Returns a tuple of two arrays. First element is the list of the elements in
     array, excluding the extrema. Second element is an array of tupples with the
@@ -323,6 +322,23 @@ function distance(new::Allocation, old::Allocation)
 end
 
 
+function print_and_stop(dist, i, tol, print_every, max_iters)
+    stop  = false
+    if mod(i, print_every) == 1
+        println("Iteration:", i, " error:", dist)
+    end
+    if (dist < tol)
+        println("Converged!! Iteration:", i, " error: ", dist)
+        stop = true 
+    end 
+    if i > max_iters
+        println("Did not converge!! Iteration: ", max_iters, " error: ", dist)
+        stop = true
+    end
+    return stop 
+end
+
+
 function solve(
     model; 
     new=Allocation(model), 
@@ -334,25 +350,17 @@ function solve(
 
     tmp1, tmp2, tmp3 = similar(new.vR), similar(new.vR), similar(new.vD)
     old = start
-    dist = 0.0
-    for i in 1:max_iters
+    i = 1
+    while true 
         iterate_once!(
             new, model, old; 
             tmp_EV=tmp1, tmp_vMax=tmp2, tmp_EvD=tmp3
         )
-        dist = distance(new, old)
         # dist = chebyshev(new.vR, old.vR) + chebyshev(new.q, old.q)
-        if mod(i, 100) == 1
-            println("Iteration:", i, "  error:", dist)
-        end 
-        if (dist < tol)
-            println("Iteration:", i, " error: ", dist)
-            return new
-        else
-            new, old = old, new
-        end
+        print_and_stop(distance(new, old), i, tol, 100, max_iters) && break 
+        new, old = old, new
+        i += 1
     end
-    println("Did not converge!, iteration: ", max_iters, " error: ", dist)
     return new
 end
 
@@ -423,18 +431,7 @@ function find_ergodic(
     v1 = similar(v0)
     while true
         mul!(v1, T, v0)
-        dist = chebyshev(v1, v0)  # sup norm
-        if mod(i, 100) == 1
-            println("Iteration:", i, "  error:", dist)
-        end
-        if (dist < tol)
-            println("Iteration:", i, " error: ", dist)
-            break 
-        end 
-        if i > max_iters
-            println("Did not converge!!")
-            break
-        end
+        print_and_stop(chebyshev(v1, v0), i, tol, 100, max_iters) && break 
         i += 1
         v1, v0 = v0, v1
     end
@@ -448,15 +445,15 @@ function find_ergodic(alloc::Allocation)
     # distribution. There is an addition "debt" state (the last column), which 
     # represents the default state. 
 
-    @unpack model = alloc
-    @unpack nb, ny = model 
+    @unpack nb, ny = alloc.model
     tt = create_transition_matrix(alloc)
-    cdf_ergodic = find_ergodic(tt)  # this return a 1-D vector ... 
-    cdf = Array{Float64}(undef, ny, nb + 1) # and we transform it to a 2-D one.
-    for i in eachindex(cdf_ergodic)
-        # exploits that the index of cdf_ergodic is equivalent to the 
-        # linear index in cdf (first iterate y_grid, then b_grid).
-        cdf[i] = cdf_ergodic[i]
+    ergodic_1D = find_ergodic(tt)  # this Returns a 1-D vector ... 
+    # and we transform it to a 2-D one.
+    ergodic_2D = Array{Float64}(undef, ny, nb + 1) 
+    for i in eachindex(ergodic_1D)
+        # exploits that the index of ergodic_1D is equivalent to the 
+        # linear index in ergodic_2D (first iterate y_grid, then b_grid).
+        ergodic_2D[i] = ergodic_1D[i]
     end 
-    return cdf
+    return ergodic_2D
 end
