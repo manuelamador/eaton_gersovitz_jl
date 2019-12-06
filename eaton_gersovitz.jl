@@ -79,7 +79,7 @@ Allocation(model::EatonGersovitzModel) = Allocation(
 
 function Base.show(io::IO, model::EatonGersovitzModel)
     @unpack R, β, γ, α, θ, b_max, b_min, nb, ny = model
-    @unpack N, ρ, σ, μ, span, inflate_ends = model.y_process.par
+    @unpack N, ρ, σ, μ, span, inflate_ends = model.y_process.pars
     print(
         io, 
         "R=", R, " β=", β, " γ=", γ, " α=", α," θ=", θ,
@@ -167,7 +167,7 @@ function  logAR1(;
     end
     return (
         T=T, grid=y_grid, mean=y_mean, 
-        par=(N=N, ρ=ρ, σ=σ, μ=μ, span=span, inflate_ends=inflate_ends)
+        pars=(N=N, ρ=ρ, σ=σ, μ=μ, span=span, inflate_ends=inflate_ends)
     )
 end
 
@@ -243,9 +243,10 @@ end
 function update_vD!(new, model, old; tmp=similar(new.vD))
     @unpack T, θ, zero_index, y_def_grid, y_grid, α = model
     
-    mm = @view new.vMax[:, zero_index] # vMax allows the possibility of 
-        # immediate default after re-entry. Important for iterations away from
-        # fixed point. 
+    # We use vMax to compute vD as it allows the possibility of  
+    # immediate default after re-entry. 
+    # Important for iterations away from fixed point. 
+    mm = @view new.vMax[:, zero_index] 
     tmp .= θ .* (mm.^(1-α)) .+ (1-θ) .* (old.vD.^(1-α))
     Threads.@threads for iy in eachindex(y_grid)
         cont_value = 0.0 
@@ -470,10 +471,10 @@ function find_ergodic(alloc::Allocation)
     @unpack nb, ny = alloc.model
     tt = create_transition_matrix(alloc)
     ergodic_1D = find_ergodic(tt)  # this Returns a 1-D vector ... 
-    # and we transform it to a 2-D one.
+    # .. and we transform it to a 2-D one.
     ergodic_2D = Array{Float64}(undef, ny, nb + 1) 
     for i in eachindex(ergodic_1D)
-        # exploits that the index of ergodic_1D is equivalent to the 
+        # This exploits that the index of ergodic_1D is equivalent to the 
         # linear index in ergodic_2D (first iterate y_grid, then b_grid).
         ergodic_2D[i] = ergodic_1D[i]
     end 
