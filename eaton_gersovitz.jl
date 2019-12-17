@@ -11,11 +11,12 @@ const _TOL = 10.0^(-12)
 const _MAX_ITERS = 10000 
 
 
-########################################################################
+###############################################################################
 #
 # Structs and constructors
 # 
 #
+
 
 # `EatonGersovitz` contains the basic parameters of the model as well 
 # as some other values and the debt grid. 
@@ -36,8 +37,8 @@ const _MAX_ITERS = 10000
         span=3.0, 
         inflate_ends=false
     ) 
-    # y_process should be a named tuple with a transition matrix, T, a grid, grid,
-    # as well as a value for the ergodic mean, mean. 
+    # y_process should be a named tuple with a transition matrix, T, a grid, 
+    # grid, as well as a value for the ergodic mean, mean. 
     y_def_fun::F1 = arellano_default_cost(0.969, y_process.mean)
 
     # generated parameters
@@ -96,8 +97,9 @@ function Base.show(io::IO, alloc::Allocation)
 end
 
 
+###############################################################################
 #
-# Functions related to the constructor of TwoStateModel
+# Functions related to the constructor of EatonGersovitzModel
 #
 
 
@@ -127,11 +129,16 @@ function quadratic_default_cost(h1, h2)
     return x -> (x - max(zero(h1), h1 * x + h2 * x^2))
 end 
 
-# Taken from Stelios code 
+
+"""
+    logAR1(N=100, ρ=0.948503, σ=0.027093, μ=0.0, span=3.0, inflate_ends=true)
+
+    Return a NamedTuple containing the Tauchen discretization of an AR1.
+"""
 function  logAR1(;
     N=100, ρ=0.948503, σ=0.027093, μ=0.0, span=3.0, inflate_ends=true
 )
-    # Get discretized space using Tauchen's method
+    # Get discretized space using Tauchen's method. Taken from Stelios.
 
     # Define versions of the standard normal cdf for use in the tauchen method
     std_norm_cdf(x::Real) = 0.5 * erfc(-x/sqrt(2))
@@ -172,18 +179,23 @@ function  logAR1(;
 end
 
 
+"""
+    get_d_and_c_fun(gridlen)
+
+Return a function to be used in the "divide and conquer" algorithm.
+https://doi.org/10.3982/QE640 
+""" 
 function get_d_and_c_fun(gridlen::Int64)
-    """
-    Generate a bisection tree from array to be used in the "divide and conquer"
-    algorithm.  https://doi.org/10.3982/QE640
-
-    Returns a tuple of two arrays. First element is the list of the elements in
-    array, excluding the extrema. Second element is an array of tupples with the
-    each of the parents.
-    """
+    
     function create_tree(array)
+        #=
+         create_tree(array) returns a tuple of two arrays. 
+        First element is the list of the elements in array, excluding 
+        the extrema. Second element is an array of tupples with the
+        each of the parents needed for the bisection.
+        =# 
 
-        #    Auxiliary function
+        # Auxiliary function to populate the tree_list
         function create_subtree!(
             tree_list, 
             parents_list, # modified in place
@@ -212,8 +224,12 @@ function get_d_and_c_fun(gridlen::Int64)
         return (tree_list, parents_list)
     end
 
-    # Given an index i and a tree returns the current index in the three as well 
-    # as the indices of the parents.
+    #= 
+    Given an index i, a vector of policy indexes and a tree it returns a tuple 
+    containing the grid index associated with the ith position in the tree, 
+    and the policy indexes of the parents. Handles the extrema of the grid as 
+    well 
+    =#
     function d_and_c_index_bounds(i, pol_vector, tree)
         if i == 1 
             b_i, left_bound, right_bound = 1, 1, gridlen
@@ -229,8 +245,15 @@ function get_d_and_c_fun(gridlen::Int64)
     end
 
     tree = create_tree(collect(1:gridlen))
+    # Encapsulate and return the d_and_c_index_bounds function
     return ((x, pol) -> d_and_c_index_bounds(x, pol, tree))
 end
+
+
+###############################################################################
+#
+# Helper functions 
+#
 
 
 function EZutility(model, c, V)
@@ -240,12 +263,55 @@ function EZutility(model, c, V)
 end
 
 
+function assign!(new::Allocation, iy, ib, vR, vMax, repay, b_pol)
+    new.vR[iy, ib] = vR
+    new.vMax[iy, ib] = vMax
+    new.repay[iy, ib] = repay
+    new.b_pol[iy, ib] = b_pol
+end
+
+
+# Helper distance function 
+function distance(new::Allocation, old::Allocation)
+    error = 0.0
+    for (a, b, c, d) in zip(new.vR, old.vR, new.q, old.q)
+        error = max(error, abs(a - b), abs(c - d))
+    end 
+    return error
+end
+
+
+function print_and_stop(dist, i, tol, print_every, max_iters)
+    stop  = false
+    if mod(i, print_every) == 1
+        println("Iteration:", i, " error:", dist)
+    end
+    if (dist < tol)
+        println("Converged!! Iteration:", i, " error: ", dist)
+        stop = true 
+    end 
+    if i > max_iters
+        println("DID NOT CONVERGE!! Iteration: ", max_iters, " error: ", dist)
+        stop = true
+    end
+    return stop 
+end
+
+
+###############################################################################
+#
+# Solver methods
+#
+
+
 function update_vD!(new, model, old; tmp=similar(new.vD))
     @unpack T, θ, zero_index, y_def_grid, y_grid, α = model
     
-    # We use vMax to compute vD as it allows the possibility of  
-    # immediate default after re-entry. 
-    # Important for iterations away from fixed point. 
+    #=
+    We use vMax to compute vD as it allows the possibility of  
+    immediate default after re-entry. 
+    Important for iterations away from fixed point. 
+    =#
     mm = @view new.vMax[:, zero_index] 
     tmp .= θ .* (mm.^(1-α)) .+ (1-θ) .* (old.vD.^(1-α))
     Threads.@threads for iy in eachindex(y_grid)
@@ -265,14 +331,6 @@ function update_q!(new, model)
 end
 
 
-function assign!(new, iy, ib, vR, vMax, repay, b_pol)
-    new.vR[iy, ib] = vR
-    new.vMax[iy, ib] = vMax
-    new.repay[iy, ib] = repay
-    new.b_pol[iy, ib] = b_pol
-end
-
-
 function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
     @unpack u, β, γ, α, y_grid, b_grid, d_and_c_fun, T, nb, ny, min_v = model
 
@@ -286,12 +344,12 @@ function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
             # already defaulted with less debt -- default here too
             assign!(new, iy, ib, min_v, old.vD[iy], false, 0)
         else
-            first_valid = true 
-            current_max = min_v 
-            policy = nb  # default value if no value is feasible
-                         # This is important because for div and conquer
-                         # policy is used to restrict choice sets every where
-                         # else. 
+            first_valid = true current_max = min_v 
+            
+            # Default value if no value is feasible This is important
+            # because for div and conquer policy is used to restrict
+            # choice sets every where else. 
+            policy = nb 
             for ib_prime in left_bound:right_bound
                 c = y_grid[iy]+ old.q[iy, ib_prime] * b_grid[ib_prime] - 
                     b_grid[ib]
@@ -305,9 +363,11 @@ function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
                 end
             end
             if (!first_valid) && (current_max >= old.vD[iy])
+                # Found an optimal policy.
                 assign!(new, iy, ib, current_max, current_max, true, policy)
             else 
-                # not feasible or default is preferred
+                # No feasible consumption at this debt or default is preferred
+                # Assign the default value vD to vMax
                 assign!(new, iy, ib, current_max, old.vD[iy], false, policy)
                 default_at = ib
             end 
@@ -335,33 +395,11 @@ function iterate_once!(
 end
 
 
-# Helper distance function 
-function distance(new::Allocation, old::Allocation)
-    error = 0.0
-    for (a, b, c, d) in zip(new.vR, old.vR, new.q, old.q)
-        error = max(error, abs(a - b), abs(c - d))
-    end 
-    return error
-end
+"""
+    solve(model[, new, start, max_iters, tol])
 
-
-function print_and_stop(dist, i, tol, print_every, max_iters)
-    stop  = false
-    if mod(i, print_every) == 1
-        println("Iteration:", i, " error:", dist)
-    end
-    if (dist < tol)
-        println("Converged!! Iteration:", i, " error: ", dist)
-        stop = true 
-    end 
-    if i > max_iters
-        println("Did not converge!! Iteration: ", max_iters, " error: ", dist)
-        stop = true
-    end
-    return stop 
-end
-
-
+Solve the Eaton-Gersovitz Model
+"""
 function solve(
     model; 
     new=Allocation(model), 
@@ -369,8 +407,6 @@ function solve(
     max_iters::Int64=_MAX_ITERS,
     tol::Float64=_TOL
 )
-    # Solves the Eaton-Gersovitz model. 
-
     tmp1, tmp2, tmp3 = similar(new.vR), similar(new.vR), similar(new.vD)
     old = start
     i = 1
@@ -388,16 +424,24 @@ function solve(
 end
 
 
-function create_transition_matrix(alloc)
-    # Construct a sparse matrix containing the transition matrix associated 
-    # with alloc. 
-    # The columns are the current state, the rows are next period state.
-    # The state vector is a 1-D array where position ny * (ib - 1) + iy 
-    # corresponds to (iy, ib), where ny is the total number of y points.
-    # That is, we cycle through the y_grid, and then through the b_grid. 
-    # This 1-D state vector contains an additional ny states at its end, 
-    # representing the default state with each of its endowment realizations. 
+###############################################################################
+#
+# Ergodic distrbution methods
+#
 
+
+"""
+    create_transition_matrix(alloc)
+
+Construct a sparse matrix containing the transition matrix associated with
+alloc. The columns are the current state, the rows are next period state. The
+state vector is a 1-D array where position ny * (ib - 1) + iy  corresponds to
+(iy, ib), where ny is the total number of y points. That is, we cycle through
+the y_grid, and then through the b_grid. This 1-D state vector contains an
+additional ny states at its end, representing the default state with each of its
+endowment realizations. 
+""" 
+function create_transition_matrix(alloc)
     @unpack model = alloc 
     @unpack θ, T, y_grid, b_grid, ny, nb = model 
 
@@ -444,12 +488,16 @@ function create_transition_matrix(alloc)
 end
 
 
+"""
+    find_ergodic(T[, v0, max_iters, tol])
+
+Given a transition probability T, and an initial vector v0, calculates
+the ergodic distribution by pre-multiplying v0 by T until convergence. 
+"""
 function find_ergodic(
     T; 
     v0=ones(Float64, size(T)[1]) / size(T)[1], max_iters=_MAX_ITERS, tol=_TOL
 )
-    # Given a transition probability T, and an initial vector v0, calculates
-    # the ergodic distribution by pre-multiplying v0 by T until convergence. 
     i = 1
     v1 = similar(v0)
     while true
@@ -462,12 +510,15 @@ function find_ergodic(
 end 
 
 
-function find_ergodic(alloc::Allocation)
-    # Returns the ergodic distribution associated with alloc.
-    # Returns a matrix  of dimension ny * (nb + 1) containing the ergodic
-    # distribution. There is an addition "debt" state (the last column), which 
-    # represents the default state. 
+"""
+    find_ergodic(alloc::Allocation)
 
+Returns the ergodic distribution associated with alloc.
+Returns a matrix  of dimension ny * (nb + 1) containing the ergodic
+distribution. There is an addition "debt" state (the last column), which 
+represents the default state. 
+"""
+function find_ergodic(alloc::Allocation)
     @unpack nb, ny = alloc.model
     tt = create_transition_matrix(alloc)
     ergodic_1D = find_ergodic(tt)  # this Returns a 1-D vector ... 
