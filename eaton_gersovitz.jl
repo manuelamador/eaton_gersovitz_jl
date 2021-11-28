@@ -20,7 +20,7 @@ const _MAX_ITERS = 10000
 
 # `EatonGersovitz` contains the basic parameters of the model as well 
 # as some other values and the debt grid. 
-@with_kw struct EatonGersovitzModel{M, F1, F2, F3} @deftype Float64
+@with_kw struct EatonGersovitzModel{M, F1, F2} @deftype Float64
     R = 1.017
     β = 0.953
     γ = 2.0 # risk aversion parameter
@@ -30,12 +30,12 @@ const _MAX_ITERS = 10000
     b_min = -0.2   # minimum debt level 
     nb_approx::Int64 = 200  # approximate points for B grid 
     y_process::M = logAR1(
-        N=200, 
-        ρ=0.948503, 
-        σ=0.027093, 
-        μ=0.0, 
-        span=3.0, 
-        inflate_ends=false
+        N = 200, 
+        ρ = 0.948503, 
+        σ = 0.027093, 
+        μ = 0.0, 
+        span = 3.0, 
+        inflate_ends = false
     ) 
     # y_process should be a named tuple with a transition matrix, T, a grid, 
     # grid, as well as a value for the ergodic mean, mean. 
@@ -50,8 +50,7 @@ const _MAX_ITERS = 10000
     b_grid::Array{Float64, 1} = generate_b_grid(b_min, b_max, nb_approx)
     nb::Int64 = length(b_grid)
     zero_index::Int64 = findfirst(isequal(0.0), b_grid)
-    d_and_c_fun::F2 = nothing
-    u::F3 = (c -> c^(1 - γ))
+    u::F2 = (c -> c^(1 - γ))
     min_v = 0.0
 end
 
@@ -281,7 +280,7 @@ end
 
 
 function optimize!(new, tmp_EV, model, old, iy, ib, (bl, bh))
-    @unpack u, β, γ, α, y_grid, b_grid, d_and_c_fun, T, nb, ny, min_v = model
+    @unpack u, β, γ, α, y_grid, b_grid, min_v, nb = model
 
     first_valid = true 
     current_max = min_v
@@ -335,10 +334,10 @@ Solve the Eaton-Gersovitz Model
 """
 function solve(
     model; 
-    new=Allocation(model), 
-    start=Allocation(model),
-    max_iters::Int64=_MAX_ITERS,
-    tol::Float64=_TOL
+    new = Allocation(model), 
+    start = Allocation(model),
+    max_iters::Int64 = _MAX_ITERS,
+    tol::Float64 = _TOL
 )
     tmp1, tmp2, tmp3 = similar(new.vR), similar(new.vR), similar(new.vD)
     old = start
@@ -378,7 +377,6 @@ function create_transition_matrix(alloc)
     @unpack model = alloc 
     @unpack θ, T, y_grid, b_grid, ny, nb = model 
 
-    non_zero_elements = ny * nb + ny * 2
     col_list = Int64[]
     row_list = Int64[]
     val_list = Float64[]
@@ -429,7 +427,7 @@ the ergodic distribution by pre-multiplying v0 by T until convergence.
 """
 function find_ergodic(
     T; 
-    v0=ones(Float64, size(T)[1]) / size(T)[1], max_iters = _MAX_ITERS, tol = _TOL
+    v0 = ones(Float64, size(T)[1]) / size(T)[1], max_iters = _MAX_ITERS, tol = _TOL
 )
     i = 1
     v1 = similar(v0)
