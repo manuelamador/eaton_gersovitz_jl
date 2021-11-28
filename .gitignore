@@ -1,3 +1,4 @@
 
 .vscode/settings.json
 .gitattributes
+.ipynb_checkpoints/*.ipynb
