@@ -25,6 +25,7 @@ Pkg.instantiate()
 using Plots
 default(label = "", lw = 2)
 
+using Revise
 includet(joinpath(@__DIR__, "eaton_gersovitz.jl"))
 
 m = EatonGersovitzModel(β = 0.953)
