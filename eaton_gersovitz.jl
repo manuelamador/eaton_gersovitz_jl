@@ -141,8 +141,7 @@ function  logAR1(;
     # Get discretized space using Tauchen's method. Taken from Stelios.
 
     # Define versions of the standard normal cdf for use in the tauchen method
-    std_norm_cdf(x::Real) = 0.5 * erfc(-x/sqrt(2))
-    std_norm_cdf(x::AbstractArray) = 0.5 .* erfc(-x./sqrt(2))
+    std_norm_cdf = x -> 0.5 * erfc(-x/sqrt(2))
 
     a_bar = span * σ / sqrt(1 - ρ^2)
     y = LinRange(-a_bar, a_bar, N)  # this refers to the log of y
@@ -275,7 +274,7 @@ end
 function solve_for_single_iy!(new, tmp_EV, model, old, iy)
     bh = length(model.b_grid)
     optimize!(new, tmp_EV, model, old, iy, 1, (1, bh))
-    optimize!(new, tmp_EV, model, old, iy, bh, (1, bh))
+    optimize!(new, tmp_EV, model, old, iy, bh, (new.b_pol[iy, 1], bh))
     
     divide_and_conquer!(new, tmp_EV, model, old, iy, (1, bh))
 end 
