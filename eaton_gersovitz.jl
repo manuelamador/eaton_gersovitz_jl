@@ -50,7 +50,7 @@ const _MAX_ITERS = 10000
     b_grid::Array{Float64, 1} = generate_b_grid(b_min, b_max, nb_approx)
     nb::Int64 = length(b_grid)
     zero_index::Int64 = findfirst(isequal(0.0), b_grid)
-    d_and_c_fun::F2 = get_d_and_c_fun(nb)
+    d_and_c_fun::F2 = nothing
     u::F3 = (c -> c^(1 - γ))
     min_v = 0.0
 end
@@ -108,7 +108,7 @@ insert_and_dedup!(v::Vector, x) = (splice!(v, searchsorted(v,x), x); v)
 
 
 function generate_b_grid(b_min, b_max, nB_approx)
-    grid = collect(range(b_min, stop=b_max, length=nB_approx))
+    grid = collect(range(b_min, stop = b_max, length = nB_approx))
     insert_and_dedup!(grid, 0.0) # make sure that zero is in the grid of assets
                                  # important for re-entry
     return grid
@@ -136,7 +136,7 @@ end
     Return a NamedTuple containing the Tauchen discretization of an AR1.
 """
 function  logAR1(;
-    N=100, ρ=0.948503, σ=0.027093, μ=0.0, span=3.0, inflate_ends=true
+    N = 100, ρ = 0.948503, σ = 0.027093, μ = 0.0, span = 3.0, inflate_ends = true
 )
     # Get discretized space using Tauchen's method. Taken from Stelios.
 
@@ -176,77 +176,6 @@ function  logAR1(;
         T=T, grid=y_grid, mean=y_mean, 
         pars=(N=N, ρ=ρ, σ=σ, μ=μ, span=span, inflate_ends=inflate_ends)
     )
-end
-
-
-"""
-    get_d_and_c_fun(gridlen)
-
-Return a function to be used in the "divide and conquer" algorithm.
-https://doi.org/10.3982/QE640 
-""" 
-function get_d_and_c_fun(gridlen::Int64)
-    
-    function create_tree(array)
-        #=
-         create_tree(array) returns a tuple of two arrays. 
-        First element is the list of the elements in array, excluding 
-        the extrema. Second element is an array of tupples with the
-        each of the parents needed for the bisection.
-        =# 
-
-        # Auxiliary function to populate the tree_list
-        function create_subtree!(
-            tree_list, 
-            parents_list, # modified in place
-            array
-        )
-            length = size(array)[1]
-            if length == 2
-                return
-            else
-                parents = (array[1], array[end])
-                halflen = (length + 1)÷2
-                push!(tree_list, array[halflen])
-                push!(parents_list, parents)
-                create_subtree!(
-                    tree_list, parents_list, @view array[1:halflen]
-                )
-                create_subtree!(
-                    tree_list, parents_list, @view array[halflen:end]
-                )
-            end 
-        end
-
-        tree_list = eltype(array)[]
-        parents_list = Tuple{eltype(array), eltype(array)}[]
-        create_subtree!(tree_list, parents_list, array)
-        return (tree_list, parents_list)
-    end
-
-    #= 
-    Given an index i, a vector of policy indexes and a tree it returns a tuple 
-    containing the grid index associated with the ith position in the tree, 
-    and the policy indexes of the parents. Handles the extrema of the grid as 
-    well 
-    =#
-    function d_and_c_index_bounds(i, pol_vector, tree)
-        if i == 1 
-            b_i, left_bound, right_bound = 1, 1, gridlen
-        elseif i == 2
-            b_i, left_bound, right_bound  = gridlen, pol_vector[1], gridlen 
-        else
-            index = i - 2
-            b_i = tree[1][index]
-            left_bound = pol_vector[tree[2][index][1]]
-            right_bound = pol_vector[tree[2][index][2]]
-        end 
-        return (b_i, left_bound, right_bound)
-    end
-
-    tree = create_tree(collect(1:gridlen))
-    # Encapsulate and return the d_and_c_index_bounds function
-    return ((x, pol) -> d_and_c_index_bounds(x, pol, tree))
 end
 
 
@@ -304,7 +233,7 @@ end
 #
 
 
-function update_vD!(new, model, old; tmp=similar(new.vD))
+function update_vD!(new, model, old; tmp = similar(new.vD))
     @unpack T, θ, zero_index, y_def_grid, y_grid, α = model
     
     #=
@@ -316,10 +245,10 @@ function update_vD!(new, model, old; tmp=similar(new.vD))
     tmp .= θ .* (mm.^(1-α)) .+ (1-θ) .* (old.vD.^(1-α))
     Threads.@threads for iy in eachindex(y_grid)
         cont_value = 0.0 
-         for iy′ in eachindex(y_grid)
+         @inbounds for iy′ in eachindex(y_grid)
             cont_value += T[iy′, iy] * tmp[iy′]
          end 
-         new.vD[iy] = EZutility(model, y_def_grid[iy], cont_value)
+         @inbounds new.vD[iy] = EZutility(model, y_def_grid[iy], cont_value)
     end
 end
 
@@ -331,54 +260,59 @@ function update_q!(new, model)
 end
 
 
-function solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
+
+function divide_and_conquer!(new, tmp_EV, model, old, iy, (bl, bh))
+    if bl + 1 < bh
+        bmid = (bl + bh) ÷ 2
+        optimize!(new, tmp_EV, model, old, iy, bmid, (new.b_pol[iy, bl], new.b_pol[iy, bh]))
+
+        divide_and_conquer!(new, tmp_EV, model, old, iy, (bl, bmid))
+        divide_and_conquer!(new, tmp_EV, model, old, iy, (bmid, bh))
+    end
+end 
+
+
+function solve_for_single_iy!(new, tmp_EV, model, old, iy)
+    bh = length(model.b_grid)
+    optimize!(new, tmp_EV, model, old, iy, 1, (1, bh))
+    optimize!(new, tmp_EV, model, old, iy, bh, (1, bh))
+    
+    divide_and_conquer!(new, tmp_EV, model, old, iy, (1, bh))
+end 
+
+
+function optimize!(new, tmp_EV, model, old, iy, ib, (bl, bh))
     @unpack u, β, γ, α, y_grid, b_grid, d_and_c_fun, T, nb, ny, min_v = model
 
-    default_at = nb + 1
-    for ib_iter in 1:nb
-        ib, left_bound, right_bound = d_and_c_fun(
-            ib_iter, 
-            @view new.b_pol[iy, :]
-        )
-        if ib > default_at 
-            # already defaulted with less debt -- default here too
-            assign!(new, iy, ib, min_v, old.vD[iy], false, 0)
-        else
-            first_valid = true current_max = min_v 
-            
-            # Default value if no value is feasible This is important
-            # because for div and conquer policy is used to restrict
-            # choice sets every where else. 
-            policy = nb 
-            for ib_prime in left_bound:right_bound
-                c = y_grid[iy]+ old.q[iy, ib_prime] * b_grid[ib_prime] - 
-                    b_grid[ib]
-                if c > 0.0
-                    m = ((1 - β) * u(c) + tmp_EV[iy, ib_prime])^(1/(1-γ))
-                    if (first_valid) || (m > current_max)
-                        current_max = m 
-                        policy = ib_prime
-                        first_valid = false
-                    end
-                end
+    first_valid = true 
+    current_max = min_v
+    policy = nb 
+    @inbounds for ib_prime in bl:bh
+        c = y_grid[iy] + old.q[iy, ib_prime] * b_grid[ib_prime] - 
+            b_grid[ib]
+        if c > 0.0
+            m = ((1 - β) * u(c) + tmp_EV[iy, ib_prime])^(1/(1-γ))
+            if (first_valid) || (m > current_max)
+                current_max = m 
+                policy = ib_prime
+                first_valid = false
             end
-            if (!first_valid) && (current_max >= old.vD[iy])
-                # Found an optimal policy.
-                assign!(new, iy, ib, current_max, current_max, true, policy)
-            else 
-                # No feasible consumption at this debt or default is preferred
-                # Assign the default value vD to vMax
-                assign!(new, iy, ib, current_max, old.vD[iy], false, policy)
-                default_at = ib
-            end 
         end
     end
+    if (!first_valid) && (current_max >= old.vD[iy])
+        # Found an optimal policy.
+        assign!(new, iy, ib, current_max, current_max, true, policy)
+    else 
+        # No feasible consumption at this debt or default is preferred
+        # Assign the default value vD to vMax
+        @inbounds assign!(new, iy, ib, current_max, old.vD[iy], false, policy)
+    end 
 end
 
 
 function iterate_once!(
     new, model, old; 
-    tmp_EV=similar(new.vR), tmp_vMax=similar(new.vR), tmp_EvD=similar(new.vD)
+    tmp_EV = similar(new.vR), tmp_vMax = similar(new.vR), tmp_EvD = similar(new.vD)
 )
     @unpack T, β, γ, α = model
 
@@ -388,7 +322,7 @@ function iterate_once!(
     tmp_EV .= β .* tmp_EV .^ ((1-γ)/(1-α))
 
     Threads.@threads for iy in 1:model.ny
-        solve_for_single_iy!(new, tmp_EV, tmp_vMax, model, old, iy)
+        solve_for_single_iy!(new, tmp_EV, model, old, iy)
     end 
     update_vD!(new, model, old; tmp=tmp_EvD)
     update_q!(new, model)
@@ -413,7 +347,7 @@ function solve(
     while true 
         iterate_once!(
             new, model, old; 
-            tmp_EV=tmp1, tmp_vMax=tmp2, tmp_EvD=tmp3
+            tmp_EV = tmp1, tmp_vMax = tmp2, tmp_EvD = tmp3
         )
         # dist = chebyshev(new.vR, old.vR) + chebyshev(new.q, old.q)
         print_and_stop(distance(new, old), i, tol, 100, max_iters) && break 
@@ -496,7 +430,7 @@ the ergodic distribution by pre-multiplying v0 by T until convergence.
 """
 function find_ergodic(
     T; 
-    v0=ones(Float64, size(T)[1]) / size(T)[1], max_iters=_MAX_ITERS, tol=_TOL
+    v0=ones(Float64, size(T)[1]) / size(T)[1], max_iters = _MAX_ITERS, tol = _TOL
 )
     i = 1
     v1 = similar(v0)
